@@ -49,6 +49,10 @@ from data_sources.bulk_data import LocalDataStore
 from tools import FedWatchTools
 from fraud_patterns import FRAUD_PATTERNS, Precision
 from detectors.comprehensive_detector import ComprehensiveFraudDetector, FraudIndicator
+from console import (
+    logger, print_scan_header, print_scan_results, print_investigation_start,
+    print_footer, info, success, warning, error, loading, Theme, Colors
+)
 
 
 @dataclass
@@ -172,11 +176,11 @@ class DailyFraudScanner:
             start_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
         if self.verbose:
-            print(f"  Date range: {start_date} to {end_date}")
-            print(f"  Minimum value: ${min_value:,.0f}")
+            logger.metric("Date Range", f"{start_date} to {end_date}")
+            logger.metric("Minimum Value", f"${min_value:,.0f}")
             if agency:
-                print(f"  Agency filter: {agency}")
-            print(f"  Max contracts: {limit}")
+                logger.metric("Agency Filter", agency)
+            logger.metric("Max Contracts", str(limit))
 
         # Fetch in batches (API limit is 100 per page)
         all_contracts = []
@@ -184,7 +188,7 @@ class DailyFraudScanner:
         max_pages = (limit + 99) // 100  # Ceiling division
 
         while True:
-            print(f"\r  Fetching page {page}/{max_pages}... ({len(all_contracts)} contracts)", end="", flush=True)
+            logger.progress(len(all_contracts), limit, "Fetching contracts")
 
             result = await self.usaspending.search_contracts(
                 start_date=start_date,
@@ -204,7 +208,7 @@ class DailyFraudScanner:
         # Trim to limit if we fetched more
         all_contracts = all_contracts[:limit]
 
-        print(f"\r  Fetched {len(all_contracts)} contracts from {page} page(s)        ")
+        success(f"Fetched {len(all_contracts)} contracts from {page} page(s)")
 
         return all_contracts
 
@@ -263,7 +267,7 @@ class DailyFraudScanner:
         # Build index: address -> list of UEIs at that address
         for i, uei in enumerate(ueis):
             if (i + 1) % 50 == 0:
-                print(f"\r  Indexing addresses: {i + 1}/{total} ({(i+1)*100//total}%)", end="", flush=True)
+                logger.progress(i + 1, total, "Indexing addresses")
 
             entity = self._get_entity_cached(uei)
             if entity:
@@ -276,7 +280,7 @@ class DailyFraudScanner:
 
         # Count shared addresses
         shared_count = sum(1 for addrs in self._address_index.values() if len(addrs) > 1)
-        print(f"\r  Indexed {total} contractors, {shared_count} shared addresses found")
+        success(f"Indexed {total} contractors, {shared_count} shared addresses found")
 
         self._address_index_built = True
 
@@ -410,7 +414,7 @@ class DailyFraudScanner:
                     }
                 except Exception as e:
                     if self.verbose:
-                        print(f"  Warning: Deep analysis failed for {uei}: {e}")
+                        warning(f"Deep analysis failed for {uei}: {e}")
                     self._contractor_cache[uei] = None
 
             cached = self._contractor_cache.get(uei)
@@ -518,7 +522,7 @@ class DailyFraudScanner:
         from claude_agent_sdk import query, ClaudeAgentOptions
         from pathlib import Path
 
-        print(f"\n  Investigating {alert.recipient_name}...")
+        print_investigation_start(alert.contract_id, alert.recipient_name, alert.contract_value)
 
         # Build investigation prompt
         flags_summary = "\n".join([
@@ -617,10 +621,13 @@ EVIDENCE URLS:
         report = self._parse_investigation_result(alert, investigation_result)
         self.investigation_reports.append(report)
 
-        # Print summary
-        print(f"    Result: {report.final_risk_level} risk (confidence: {report.confidence})")
+        # Print summary using alert-style output
+        level = report.final_risk_level
         if report.red_flags_confirmed:
-            print(f"    Confirmed issues: {', '.join(report.red_flags_confirmed[:2])}")
+            msg = f"Confirmed: {', '.join(report.red_flags_confirmed[:2])}"
+        else:
+            msg = report.web_research_summary[:80]
+        logger.alert(level, msg, report.contract_id, report.contract_value)
 
         return report
 
@@ -736,12 +743,14 @@ EVIDENCE URLS:
         """
         import sys
 
+        logger.section("DATA LOADING")
+
         # Fetch contracts
         if start_date and end_date:
-            print(f"Fetching contracts from {start_date} to {end_date}...")
+            loading(f"Fetching contracts from {start_date} to {end_date}...")
         else:
             days = days or 1
-            print(f"Fetching contracts from last {days} day(s)...")
+            loading(f"Fetching contracts from last {days} day(s)...")
 
         contracts = await self.fetch_contracts(
             days=days,
@@ -757,12 +766,12 @@ EVIDENCE URLS:
             return [], 0
 
         # Build address index for fast shared-address lookups
-        print("Building address index...")
+        loading("Building address index...")
         self._build_address_index(contracts)
 
-        print(f"Analyzing contracts for fraud indicators...")
+        logger.section("ANALYSIS")
         if self.deep_analysis:
-            print("  (Deep analysis enabled - this may take a few minutes)")
+            info("Deep analysis mode enabled - comprehensive detection active")
 
         # Analyze contracts in parallel with concurrency limit
         threshold_levels = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
@@ -782,12 +791,10 @@ EVIDENCE URLS:
                     flagged[0] += 1
                 # Update progress every 10 or when flagged
                 if completed[0] % 10 == 0 or result:
-                    pct = completed[0] * 100 // total_scanned
-                    sys.stdout.write(f"\r  Analyzing: {completed[0]}/{total_scanned} ({pct}%) | Flagged: {flagged[0]}")
-                    sys.stdout.flush()
+                    logger.progress(completed[0], total_scanned, "Analyzing contracts")
                 return result
 
-        print(f"  Running {concurrency} parallel analyzers...")
+        info(f"Running {concurrency} parallel analyzers...")
         results = await asyncio.gather(*[analyze_with_progress(c) for c in contracts])
 
         # Filter results
@@ -796,9 +803,9 @@ EVIDENCE URLS:
             if r and threshold_levels.index(r.risk_level) >= threshold_idx
         ]
 
-        # Clear progress line and show final status
-        sys.stdout.write(f"\r  Completed: {total_scanned} contracts analyzed, {len(alerts)} flagged          \n")
-        sys.stdout.flush()
+        # Show final analysis status
+        print()  # Clear progress line
+        success(f"Analyzed {total_scanned} contracts, flagged {len(alerts)}")
 
         # Sort by risk score (highest first)
         alerts.sort(key=lambda x: x.risk_score, reverse=True)
@@ -807,16 +814,13 @@ EVIDENCE URLS:
         if self.auto_investigate:
             high_critical = [a for a in alerts if a.risk_level in ["HIGH", "CRITICAL"]]
             if high_critical:
-                print(f"\n{'='*60}")
-                print(f"AUTONOMOUS INVESTIGATION: {len(high_critical)} HIGH/CRITICAL alerts")
-                print(f"{'='*60}")
+                logger.section("AUTONOMOUS INVESTIGATION")
+                info(f"Investigating {len(high_critical)} HIGH/CRITICAL alerts...")
 
                 for alert in high_critical:
                     await self.investigate_contractor(alert)
 
-                print(f"\n{'='*60}")
-                print(f"Investigation complete. {len(self.investigation_reports)} reports generated.")
-                print(f"{'='*60}")
+                success(f"Investigation complete. {len(self.investigation_reports)} reports generated.")
 
         return alerts, total_scanned
 
@@ -835,168 +839,117 @@ def format_console_report(
     min_value: float = 0,
     investigation_reports: list[InvestigationReport] = None
 ) -> str:
-    """Format alerts as a console-friendly report."""
-    lines = []
-    lines.append("=" * 80)
-    lines.append(f"FRAUD SCAN REPORT - {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    lines.append(f"Period: {date_desc}")
-    if min_value > 0:
-        lines.append(f"Minimum contract value: ${min_value:,.0f}")
-    if deep_analysis:
-        lines.append("Mode: DEEP ANALYSIS (comprehensive detection enabled)")
-    lines.append("=" * 80)
+    """Format alerts using Bloomberg-style console output."""
+    import io
+    import sys
 
-    # Always show total scanned
-    if total_scanned > 0:
-        flag_rate = (len(alerts) / total_scanned * 100) if total_scanned else 0
-        lines.append(f"\nCONTRACTS SCANNED: {total_scanned:,}")
-        lines.append(f"CONTRACTS FLAGGED: {len(alerts)} ({flag_rate:.1f}%)")
+    # Capture output to string
+    old_stdout = sys.stdout
+    sys.stdout = buffer = io.StringIO()
 
-    if not alerts:
-        lines.append("\n[OK] No suspicious contracts detected.")
-        return "\n".join(lines)
+    try:
+        # Summary by risk level
+        critical = sum(1 for a in alerts if a.risk_level == "CRITICAL")
+        high = sum(1 for a in alerts if a.risk_level == "HIGH")
+        medium = sum(1 for a in alerts if a.risk_level == "MEDIUM")
+        low = sum(1 for a in alerts if a.risk_level == "LOW")
 
-    # Summary by risk level
-    critical = sum(1 for a in alerts if a.risk_level == "CRITICAL")
-    high = sum(1 for a in alerts if a.risk_level == "HIGH")
-    medium = sum(1 for a in alerts if a.risk_level == "MEDIUM")
-    low = sum(1 for a in alerts if a.risk_level == "LOW")
+        # Print scan results summary
+        print_scan_results(total_scanned, len(alerts), critical, high, medium, low)
 
-    lines.append(f"\nRISK BREAKDOWN:")
-    lines.append(f"  CRITICAL: {critical:3} {'!!! IMMEDIATE ACTION REQUIRED !!!' if critical > 0 else ''}")
-    lines.append(f"  HIGH:     {high:3}")
-    lines.append(f"  MEDIUM:   {medium:3}")
-    lines.append(f"  LOW:      {low:3}")
+        if not alerts:
+            success("No suspicious contracts detected.")
+            print_footer()
+            return buffer.getvalue()
 
-    # Aggregate category scores if deep analysis
-    if deep_analysis:
-        all_categories = defaultdict(int)
-        for alert in alerts:
-            for cat, score in alert.category_scores.items():
-                all_categories[cat] += score
+        # Critical alerts
+        if critical > 0:
+            logger.section("CRITICAL ALERTS")
+            for alert in alerts:
+                if alert.risk_level == "CRITICAL":
+                    logger.alert("CRITICAL", alert.fraud_patterns[0] if alert.fraud_patterns else "Multiple indicators",
+                               alert.contract_id, alert.contract_value)
+                    logger.metric("Recipient", alert.recipient_name)
+                    logger.metric("UEI", alert.recipient_uei)
+                    logger.metric("Risk Score", f"{alert.risk_score}/100", status="bad")
+                    if alert.exclusion_match:
+                        print(f"  {Colors.BG_RED}{Colors.BRIGHT_WHITE}  EXCLUSION MATCH: DEBARRED/SUSPENDED  {Colors.RESET}")
+                    for flag in alert.flags:
+                        print(f"  {Theme.ERROR}▸ [{flag['severity']}]{Colors.RESET} {flag['description']}")
+                    print(f"  {Theme.ACCENT}⚡ {alert.recommendation}{Colors.RESET}")
+                    logger.divider()
 
-        if all_categories:
-            lines.append("\nDETECTION CATEGORIES:")
-            for cat, score in sorted(all_categories.items(), key=lambda x: -x[1]):
-                lines.append(f"  {cat}: {score} points across all alerts")
+        # High alerts
+        if high > 0:
+            logger.section("HIGH RISK ALERTS")
+            for alert in alerts:
+                if alert.risk_level == "HIGH":
+                    logger.alert("HIGH", alert.fraud_patterns[0] if alert.fraud_patterns else "Multiple indicators",
+                               alert.contract_id, alert.contract_value)
+                    print(f"    {Theme.LABEL}Recipient:{Colors.RESET} {alert.recipient_name}")
+                    for flag in alert.flags[:3]:
+                        print(f"    {Theme.WARNING}▸{Colors.RESET} {flag['description'][:60]}")
+                    print()
 
-    # Critical alerts first
-    if critical > 0:
-        lines.append("\n" + "!" * 80)
-        lines.append("CRITICAL ALERTS - IMMEDIATE ACTION REQUIRED")
-        lines.append("!" * 80)
+        # Medium/Low summary table
+        other = [a for a in alerts if a.risk_level in ["MEDIUM", "LOW"]]
+        if other:
+            logger.section(f"OTHER FLAGS ({len(other)} contracts)")
+            logger.table_header(["LEVEL", "CONTRACT", "RECIPIENT", "VALUE"], [8, 22, 28, 14])
+            for alert in other[:15]:
+                logger.table_row(
+                    [alert.risk_level, alert.contract_id[:20], alert.recipient_name[:26], f"${alert.contract_value:,.0f}"],
+                    [8, 22, 28, 14],
+                    highlight=(alert.risk_level == "MEDIUM")
+                )
+            if len(other) > 15:
+                print(f"  {Theme.DIM}... and {len(other) - 15} more{Colors.RESET}")
 
-        for alert in alerts:
-            if alert.risk_level == "CRITICAL":
-                lines.append(f"\n[CRITICAL] Contract: {alert.contract_id}")
-                lines.append(f"  Recipient: {alert.recipient_name}")
-                lines.append(f"  UEI: {alert.recipient_uei}")
-                lines.append(f"  Value: ${alert.contract_value:,.0f}")
-                lines.append(f"  Agency: {alert.agency}")
-                lines.append(f"  Risk Score: {alert.risk_score}/100")
-                if alert.exclusion_match:
-                    lines.append(f"  ** EXCLUSION MATCH: Contractor is DEBARRED/SUSPENDED **")
-                lines.append(f"  Patterns Detected: {', '.join(alert.fraud_patterns)}")
-                for flag in alert.flags:
-                    lines.append(f"  FLAG: [{flag['severity']}] {flag['pattern']}: {flag['description']}")
-                if alert.category_scores:
-                    lines.append(f"  Category Breakdown: {dict(alert.category_scores)}")
-                lines.append(f"  RECOMMENDATION: {alert.recommendation}")
+        # Investigation Results
+        if investigation_reports:
+            logger.section("INVESTIGATION RESULTS")
 
-    # High alerts
-    if high > 0:
-        lines.append("\n" + "-" * 80)
-        lines.append("HIGH RISK ALERTS")
-        lines.append("-" * 80)
+            for report in investigation_reports:
+                logger.divider("═")
+                print(f"  {Theme.HEADER}{report.contract_id}{Colors.RESET} │ {Theme.VALUE}{report.contractor_name}{Colors.RESET}")
+                print(f"  {Theme.DATA}${report.contract_value:,.0f}{Colors.RESET} │ {report.agency}")
+                logger.divider()
 
-        for alert in alerts:
-            if alert.risk_level == "HIGH":
-                lines.append(f"\n[HIGH] Contract: {alert.contract_id}")
-                lines.append(f"  Recipient: {alert.recipient_name} | UEI: {alert.recipient_uei}")
-                lines.append(f"  Value: ${alert.contract_value:,.0f} | Agency: {alert.agency}")
-                lines.append(f"  Risk Score: {alert.risk_score}/100 | Patterns: {', '.join(alert.fraud_patterns)}")
-                for flag in alert.flags:
-                    lines.append(f"  FLAG: [{flag['severity']}] {flag['description']}")
-                lines.append(f"  ACTION: {alert.recommendation}")
+                # Company verification
+                verified_icon = "✓" if report.company_verified else "✗"
+                verified_color = Theme.SUCCESS if report.company_verified else Theme.ERROR
+                print(f"  {verified_color}{verified_icon} Company Verified{Colors.RESET}")
 
-    # Medium/Low summary
-    other = [a for a in alerts if a.risk_level in ["MEDIUM", "LOW"]]
-    if other:
-        lines.append("\n" + "-" * 80)
-        lines.append(f"OTHER FLAGS ({len(other)} contracts)")
-        lines.append("-" * 80)
+                # Red flags confirmed
+                if report.red_flags_confirmed:
+                    print(f"  {Theme.ERROR}Confirmed Issues:{Colors.RESET}")
+                    for flag in report.red_flags_confirmed[:3]:
+                        print(f"    {Theme.ERROR}▸{Colors.RESET} {flag[:65]}")
 
-        for alert in other[:20]:  # Limit to 20
-            patterns_str = ', '.join(alert.fraud_patterns[:2]) if alert.fraud_patterns else 'misc'
-            lines.append(f"  [{alert.risk_level:6}] {alert.contract_id[:20]:20} | {alert.recipient_name[:25]:25} | ${alert.contract_value:>12,.0f} | {patterns_str}")
+                # Mitigating factors
+                if report.mitigating_factors:
+                    print(f"  {Theme.SUCCESS}Mitigating Factors:{Colors.RESET}")
+                    for factor in report.mitigating_factors[:2]:
+                        print(f"    {Theme.SUCCESS}+{Colors.RESET} {factor[:65]}")
 
-        if len(other) > 20:
-            lines.append(f"  ... and {len(other) - 20} more")
+                # Final assessment
+                level_colors = {
+                    "CRITICAL": Colors.BG_RED + Colors.BRIGHT_WHITE,
+                    "HIGH": Theme.ERROR,
+                    "MEDIUM": Theme.WARNING,
+                    "LOW": Theme.DATA
+                }
+                level_color = level_colors.get(report.final_risk_level, Theme.INFO)
+                print(f"\n  {level_color}▐ FINAL: {report.final_risk_level} (Confidence: {report.confidence}){Colors.RESET}")
+                print(f"  {Theme.ACCENT}⚡ {report.recommendation[:80]}{Colors.RESET}")
+                print()
 
-    # Investigation Results Section (if investigations were run)
-    if investigation_reports:
-        lines.append("\n" + "#" * 80)
-        lines.append("INVESTIGATION RESULTS")
-        lines.append("#" * 80)
+        print_footer()
 
-        for report in investigation_reports:
-            lines.append(f"\n{'='*60}")
-            lines.append(f"CONTRACT: {report.contract_id}")
-            lines.append(f"CONTRACTOR: {report.contractor_name}")
-            lines.append(f"VALUE: ${report.contract_value:,.0f} | AGENCY: {report.agency}")
-            lines.append(f"{'='*60}")
+    finally:
+        sys.stdout = old_stdout
 
-            lines.append(f"\nINITIAL FLAGS: {report.risk_level} ({report.risk_score}/100)")
-            for flag in report.flags[:3]:
-                lines.append(f"  - [{flag['severity']}] {flag['description'][:60]}")
-
-            lines.append(f"\nINVESTIGATION FINDINGS:")
-            lines.append(f"  {report.web_research_summary[:200]}...")
-
-            lines.append(f"\n  Company Verified: {'YES' if report.company_verified else 'NO'}")
-
-            if report.red_flags_confirmed:
-                lines.append(f"\n  CONFIRMED RED FLAGS:")
-                for flag in report.red_flags_confirmed[:3]:
-                    lines.append(f"    - {flag[:70]}")
-
-            if report.mitigating_factors:
-                lines.append(f"\n  Mitigating Factors:")
-                for factor in report.mitigating_factors[:3]:
-                    lines.append(f"    + {factor[:70]}")
-
-            if report.news_findings:
-                lines.append(f"\n  News/Media Findings:")
-                for finding in report.news_findings[:3]:
-                    lines.append(f"    * {finding[:70]}")
-
-            # Final assessment box
-            final_color = "!!!" if report.final_risk_level in ["HIGH", "CRITICAL"] else "   "
-            lines.append(f"\n  {'-'*50}")
-            lines.append(f"  {final_color} FINAL ASSESSMENT: {report.final_risk_level} (Confidence: {report.confidence}) {final_color}")
-            lines.append(f"  {'-'*50}")
-            lines.append(f"  RECOMMENDATION: {report.recommendation[:100]}")
-
-            if report.evidence_urls:
-                lines.append(f"\n  Evidence Sources:")
-                for url in report.evidence_urls[:3]:
-                    lines.append(f"    - {url}")
-
-        lines.append("\n" + "#" * 80)
-
-    # Footer
-    lines.append("\n" + "=" * 80)
-    if investigation_reports:
-        lines.append(f"AUTONOMOUS INVESTIGATION COMPLETE")
-        lines.append(f"Scanned {total_scanned} contracts, flagged {len(alerts)}, investigated {len(investigation_reports)}")
-    else:
-        lines.append("NOTE: Run without --no-investigate to auto-investigate HIGH/CRITICAL alerts")
-    lines.append("=" * 80)
-    lines.append(f"Report generated: {datetime.now().isoformat()}")
-    lines.append("FedWatch AI - Autonomous Fraud Detection Agent")
-    lines.append("=" * 80)
-
-    return "\n".join(lines)
+    return buffer.getvalue()
 
 
 def save_json_report(alerts: list[FraudAlert], output_path: Path, total_scanned: int = 0):
@@ -1040,7 +993,7 @@ def save_csv_report(alerts: list[FraudAlert], output_path: Path):
 
 async def main():
     parser = argparse.ArgumentParser(
-        description="Federal Contract Fraud Scanner",
+        description="FERRET - Federal Expenditure Review and Risk Evaluation Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -1109,6 +1062,13 @@ Examples:
     # Default to 1 day if no date args provided
     if not args.start_date and args.days is None:
         args.days = 1
+
+    # Show FERRET banner and scan configuration
+    print_scan_header(
+        days=args.days or 0,
+        min_value=args.min_value,
+        deep=args.deep
+    )
 
     # Run scanner
     auto_investigate = not args.no_investigate
