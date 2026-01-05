@@ -1,0 +1,72 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# =============================================================================
+# SENSITIVE FILES - NEVER COMMIT
+# =============================================================================
+.env
+.env.local
+*.key
+*.pem
+credentials*
+secrets*
+
+# Claude Code local settings (may contain personal config)
+.claude/settings.local.json
+
+# =============================================================================
+# BULK DATA - Too large for git, download separately
+# =============================================================================
+data/
+!data/.gitkeep
+
+# =============================================================================
+# GENERATED OUTPUTS - May contain contractor PII
+# =============================================================================
+outputs/
+!outputs/.gitkeep
+
+# Reports (keep directory, ignore contents)
+reports/*.md
+reports/*.json
+!reports/.gitkeep
+
+# =============================================================================
+# IDE & OS
+# =============================================================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# =============================================================================
+# Lock files (optional - can include if you want reproducible builds)
+# =============================================================================
+# uv.lock
