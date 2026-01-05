@@ -51,6 +51,10 @@ class FerretREPL:
         self.thinking_frames = ["◐", "◓", "◑", "◒"]
         self.frame_idx = 0
 
+        # Store context for follow-up queries
+        self.last_entities: list[dict] = []
+        self.last_alerts: list = []
+
     def print_banner(self):
         """Print the FERRET banner and welcome message."""
         print(format_banner("mini"))
@@ -66,12 +70,14 @@ class FerretREPL:
     def _print_help(self):
         """Print available commands."""
         print(f"  {Theme.HEADER}COMMANDS{Colors.RESET}")
-        print(f"  {Theme.DATA}scan{Colors.RESET} [days]      - Scan recent contracts for fraud")
-        print(f"  {Theme.DATA}investigate{Colors.RESET} <id> - Deep investigation of a contract")
-        print(f"  {Theme.DATA}entity{Colors.RESET} <name>    - Research a contractor")
-        print(f"  {Theme.DATA}status{Colors.RESET}           - Show current system status")
-        print(f"  {Theme.DATA}help{Colors.RESET}             - Show this help")
-        print(f"  {Theme.DATA}quit{Colors.RESET}             - Exit FERRET")
+        print(f"  {Theme.DATA}scan{Colors.RESET} [days]       - Scan recent contracts for fraud")
+        print(f"  {Theme.DATA}investigate{Colors.RESET} <id>  - Deep investigation of a contract")
+        print(f"  {Theme.DATA}entity{Colors.RESET} <name>     - Look up a contractor in SAM.gov")
+        print(f"  {Theme.DATA}contracts{Colors.RESET} [uei]   - Show contracts for an entity")
+        print(f"  {Theme.DATA}research{Colors.RESET} <name>   - Web research on a contractor")
+        print(f"  {Theme.DATA}status{Colors.RESET}            - Show current system status")
+        print(f"  {Theme.DATA}help{Colors.RESET}              - Show this help")
+        print(f"  {Theme.DATA}quit{Colors.RESET}              - Exit FERRET")
         print()
         print(f"  {Colors.DIM}Or type naturally: \"Find suspicious DOD contracts from last week\"{Colors.RESET}")
 
@@ -170,6 +176,9 @@ class FerretREPL:
             )
 
             await scanner.close()
+
+            # Store alerts for follow-up queries
+            self.last_alerts = alerts
 
             # Report results
             self.think("result", f"Scan complete: {total} contracts analyzed")
@@ -320,47 +329,81 @@ Report your findings concisely."""
 
             logger.table_header(["UEI", "NAME", "STATE", "REG DATE"], [12, 35, 6, 12])
             for entity in results:
+                name = entity.get("legal_name") or entity.get("dba_name") or "Unknown"
                 logger.table_row([
                     entity.get("uei", "N/A")[:10],
-                    entity.get("legal_business_name", "Unknown")[:33],
+                    name[:33],
                     entity.get("state", "??"),
                     entity.get("registration_date", "Unknown")[:10]
                 ], [12, 35, 6, 12])
 
             print()
+
+            # Check each entity for additional info
+            for entity in results:
+                uei = entity.get("uei")
+                name = entity.get("legal_name") or entity.get("dba_name") or "Unknown"
+
+                # Check exclusion status
+                exclusion = local.check_exclusion(uei=uei)
+                if exclusion.get("is_excluded"):
+                    self.think("observation", f"{Colors.BG_RED}{Colors.BRIGHT_WHITE} EXCLUDED {Colors.RESET} {name} is on the exclusion list!")
+
+                # Check registration age
+                reg_date_str = entity.get("registration_date", "")
+                if reg_date_str:
+                    try:
+                        from datetime import datetime
+                        reg_date = datetime.strptime(reg_date_str, "%Y%m%d")
+                        age_days = (datetime.now() - reg_date).days
+                        if age_days < 180:
+                            self.think("observation", f"{Theme.WARNING}Recent registration:{Colors.RESET} {name} registered {age_days} days ago")
+                    except ValueError:
+                        pass
+
             self.think("decision", "Check exclusion status and contract history")
+
+            # Store last searched entities for follow-up
+            self.last_entities = results
+
+            # Show available actions
+            print()
+            print(f"  {Theme.ACCENT}💡 Next actions:{Colors.RESET}")
+            print(f"     {Theme.DATA}contracts{Colors.RESET} <UEI>  - Show contracts for this entity")
+            print(f"     {Theme.DATA}research{Colors.RESET} <name>  - Web research on this contractor")
+            print()
         else:
             self.think("observation", "No exact matches in SAM.gov database")
             self.think("reasoning", "Entity may be new, use different name, or not registered")
 
-    async def handle_natural_language(self, query: str):
-        """Handle natural language queries using Claude."""
-        logger.section("PROCESSING REQUEST")
+    async def handle_contracts(self, args: str):
+        """Fetch contracts for an entity."""
+        if not args:
+            # Check if we have last searched entities
+            if self.last_entities:
+                uei = self.last_entities[0].get("uei")
+                name = self.last_entities[0].get("legal_name", "Unknown")
+                self.think("reasoning", f"Using last searched entity: {name}")
+            else:
+                warning("Please provide a UEI or search for an entity first")
+                return
+        else:
+            uei = args.split()[0].upper()
+            name = uei
 
-        self.think("observation", f"User query: \"{query}\"")
-        await asyncio.sleep(0.2)
+        logger.section("CONTRACT HISTORY")
 
-        self.think("reasoning", "Interpreting request and planning actions...")
+        self.think("observation", f"Fetching contracts for UEI: {uei}")
+        self.think("action", "Querying USASpending.gov API...")
 
-        # Use Claude to interpret and execute
-        thinking_task = asyncio.create_task(self.animate_thinking("Processing"))
+        thinking_task = asyncio.create_task(self.animate_thinking("Fetching contracts"))
 
         try:
-            from claude_agent_sdk import query as claude_query, ClaudeAgentOptions
-            from pathlib import Path
+            from data_sources import USASpendingClient
 
-            prompt = f"""You are FERRET, a federal contract fraud detection agent.
-
-The user asked: "{query}"
-
-Available actions:
-1. Scan contracts (use daily_scan.py)
-2. Investigate specific contracts
-3. Look up contractors in SAM.gov
-4. Search for news about contractors
-
-Interpret what the user wants and explain what actions you would take.
-Be concise and action-oriented."""
+            client = USASpendingClient()
+            result = await client.search_contracts(recipient_uei=uei, limit=20)
+            await client.close()
 
             self.stop_thinking()
             thinking_task.cancel()
@@ -369,21 +412,220 @@ Be concise and action-oriented."""
             except asyncio.CancelledError:
                 pass
 
+            contracts = result.contracts
+
+            if contracts:
+                self.think("result", f"Found {len(contracts)} contracts")
+
+                # Calculate totals
+                total_value = sum(c.total_obligation for c in contracts)
+                agencies = set(c.agency for c in contracts)
+
+                print()
+                logger.metric("Total Contracts", str(len(contracts)))
+                logger.metric("Total Value", f"${total_value:,.0f}")
+                logger.metric("Agencies", str(len(agencies)))
+                print()
+
+                # Show contracts table
+                logger.table_header(["DATE", "CONTRACT ID", "VALUE", "AGENCY"], [10, 24, 14, 20])
+                for c in contracts[:10]:
+                    logger.table_row([
+                        c.start_date[:10] if c.start_date else "N/A",
+                        c.contract_id[:22],
+                        f"${c.total_obligation:,.0f}",
+                        c.agency[:18] if c.agency else "N/A"
+                    ], [10, 24, 14, 20])
+
+                if len(contracts) > 10:
+                    print(f"  {Colors.DIM}... and {len(contracts) - 10} more{Colors.RESET}")
+
+                print()
+                self.think("decision", "Review large contracts or recent awards for investigation")
+            else:
+                self.think("observation", "No contracts found for this entity")
+
+        except Exception as e:
+            self.stop_thinking()
+            thinking_task.cancel()
+            self.think("error", f"Failed to fetch contracts: {str(e)}")
+
+    async def handle_research(self, args: str):
+        """Web research on a contractor."""
+        if not args:
+            if self.last_entities:
+                name = self.last_entities[0].get("legal_name", "")
+                if not name:
+                    warning("Please provide a contractor name")
+                    return
+            else:
+                warning("Please provide a contractor name")
+                return
+        else:
+            name = args.strip().strip('"').strip("'")
+
+        logger.section("WEB RESEARCH")
+
+        self.think("observation", f"Researching: {name}")
+        self.think("reasoning", "Will search for news, fraud allegations, company info")
+        self.think("action", "Initiating web search...")
+
+        thinking_task = asyncio.create_task(self.animate_thinking("Searching"))
+
+        try:
+            from claude_agent_sdk import query as claude_query, ClaudeAgentOptions
+            from pathlib import Path
+
+            prompt = f"""Research the federal contractor "{name}".
+
+Search for:
+1. Company background and legitimacy
+2. Any fraud allegations, lawsuits, or scandals
+3. News articles mentioning the company
+4. Government contract performance issues
+
+Provide a concise summary of findings. Flag any red flags found."""
+
+            self.stop_thinking()
+            thinking_task.cancel()
+            try:
+                await thinking_task
+            except asyncio.CancelledError:
+                pass
+
+            print()
+            print(f"  {Theme.HEADER}RESEARCH ACTIVITY{Colors.RESET}")
+            logger.divider()
+
             async for message in claude_query(
                 prompt=prompt,
                 options=ClaudeAgentOptions(
                     cwd=str(Path(__file__).parent),
-                    allowed_tools=["Read", "Bash", "WebSearch"],
+                    allowed_tools=["WebSearch", "WebFetch"],
                     permission_mode="bypassPermissions",
-                    max_turns=5
+                    max_turns=8
                 )
             ):
-                if hasattr(message, 'result'):
+                if hasattr(message, 'tool_use'):
+                    tool = message.tool_use
+                    if tool.name == "WebSearch":
+                        query_text = tool.input.get('query', '')[:50]
+                        self.think("action", f"Searching: {query_text}...")
+                elif hasattr(message, 'result'):
                     print()
+                    logger.section("RESEARCH FINDINGS")
                     lines = message.result.split('\n')
                     for line in lines:
                         if line.strip():
-                            print(f"  {line}")
+                            # Highlight red flags
+                            if 'fraud' in line.lower() or 'lawsuit' in line.lower() or 'scandal' in line.lower():
+                                print(f"  {Theme.ERROR}{line}{Colors.RESET}")
+                            else:
+                                print(f"  {line}")
+                    print()
+
+        except Exception as e:
+            self.stop_thinking()
+            thinking_task.cancel()
+            self.think("error", f"Research failed: {str(e)}")
+
+    async def handle_natural_language(self, query: str):
+        """Handle natural language queries using Claude agent."""
+        logger.section("PROCESSING REQUEST")
+
+        self.think("observation", f"User query: \"{query}\"")
+
+        # Build context from recent activity
+        context_parts = []
+        if self.last_entities:
+            entities_info = [f"- {e.get('legal_name', 'Unknown')} (UEI: {e.get('uei', 'N/A')}, State: {e.get('state', '??')})"
+                           for e in self.last_entities[:3]]
+            context_parts.append(f"Recently searched entities:\n" + "\n".join(entities_info))
+
+        if self.last_alerts:
+            alerts_info = [f"- {a.contract_id}: {a.recipient_name} (${a.contract_value:,.0f}, {a.risk_level})"
+                          for a in self.last_alerts[:5]]
+            context_parts.append(f"Recent scan alerts:\n" + "\n".join(alerts_info))
+
+        context = "\n\n".join(context_parts) if context_parts else "No recent activity."
+
+        self.think("reasoning", "Interpreting request and planning actions...")
+
+        thinking_task = asyncio.create_task(self.animate_thinking("Processing"))
+
+        try:
+            from claude_agent_sdk import query as claude_query, ClaudeAgentOptions
+            from pathlib import Path
+
+            prompt = f"""You are FERRET, an AI-native federal contract fraud detection agent.
+
+## Context
+{context}
+
+## User Request
+"{query}"
+
+## Available Tools
+You have access to:
+- **WebSearch**: Search the web for news, company info, fraud allegations
+- **WebFetch**: Fetch and read web pages
+- **Bash**: Run Python scripts in this directory:
+  - `uv run python daily_scan.py --days N` - Scan recent contracts
+  - `uv run python agent.py investigate CONTRACT_ID` - Investigate a contract
+
+## Instructions
+1. Understand what the user wants
+2. Take action using the tools available
+3. Report findings concisely
+
+If the user refers to "this entity" or "this contractor", use the context above.
+Be autonomous - take action, don't just explain what you would do."""
+
+            self.stop_thinking()
+            thinking_task.cancel()
+            try:
+                await thinking_task
+            except asyncio.CancelledError:
+                pass
+
+            print()
+            print(f"  {Theme.HEADER}AGENT ACTIVITY{Colors.RESET}")
+            logger.divider()
+
+            async for message in claude_query(
+                prompt=prompt,
+                options=ClaudeAgentOptions(
+                    cwd=str(Path(__file__).parent),
+                    allowed_tools=["WebSearch", "WebFetch", "Bash"],
+                    permission_mode="bypassPermissions",
+                    max_turns=10
+                )
+            ):
+                if hasattr(message, 'tool_use'):
+                    tool = message.tool_use
+                    if tool.name == "WebSearch":
+                        query_text = tool.input.get('query', '')[:50]
+                        self.think("action", f"Searching: {query_text}...")
+                    elif tool.name == "Bash":
+                        cmd = tool.input.get('command', '')[:60]
+                        self.think("action", f"Running: {cmd}...")
+                    elif tool.name == "WebFetch":
+                        url = tool.input.get('url', '')[:50]
+                        self.think("action", f"Fetching: {url}...")
+                elif hasattr(message, 'result'):
+                    print()
+                    logger.section("FINDINGS")
+                    lines = message.result.split('\n')
+                    for line in lines:
+                        if line.strip():
+                            # Highlight important findings
+                            lower_line = line.lower()
+                            if any(word in lower_line for word in ['fraud', 'lawsuit', 'scandal', 'critical', 'warning']):
+                                print(f"  {Theme.ERROR}{line}{Colors.RESET}")
+                            elif any(word in lower_line for word in ['found', 'contract', 'million', 'awarded']):
+                                print(f"  {Theme.DATA}{line}{Colors.RESET}")
+                            else:
+                                print(f"  {line}")
                     print()
 
         except Exception as e:
@@ -457,6 +699,12 @@ Be concise and action-oriented."""
 
                 elif command == "entity":
                     await self.handle_entity(args)
+
+                elif command == "contracts":
+                    await self.handle_contracts(args)
+
+                elif command == "research":
+                    await self.handle_research(args)
 
                 elif command == "status":
                     await self.handle_status()
