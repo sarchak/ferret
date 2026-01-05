@@ -41,7 +41,34 @@ uv run python daily_scan.py --days 2
 
 # Investigate a specific contract
 uv run python agent.py investigate CONTRACT_ID
+
+# Launch interactive console (recommended!)
+uv run python ferret_repl.py
 ```
+
+### Interactive Console
+
+FERRET includes a Bloomberg-terminal style interactive console that shows the agent's thinking process in real-time:
+
+```
+● FERRET ❯ scan 3
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  INITIATING SCAN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [14:32:01] 👁 User requested scan of last 3 day(s)
+  [14:32:01] 💭 Need to fetch contracts from USASpending.gov API
+  [14:32:01] 💭 Will analyze for shell companies, pricing anomalies, exclusions
+  [14:32:02] ⚡ Proceeding with 3-day scan, minimum $25,000 threshold
+  [14:32:02] ▶ Connecting to USASpending.gov...
+```
+
+Features:
+- **Visible agent thinking**: Watch the agent reason through problems
+- **Natural language**: Ask "Find suspicious DOD contracts from last week"
+- **Commands**: `scan`, `investigate`, `entity`, `status`
+- **Real-time actions**: See each API call, web search, and decision
 
 ### API Keys
 
