@@ -323,7 +323,7 @@ def print_footer():
     """Print the footer."""
     print()
     logger.divider("═")
-    print(f"  {Theme.DIM}FERRET v1.0.0 │ theaishift.dev │ github.com/sarchak/ferret{Colors.RESET}")
+    print(f"  {Colors.DIM}FERRET v1.0.0 │ theaishift.dev │ github.com/sarchak/ferret{Colors.RESET}")
     logger.divider("═")
     print()
 
