@@ -903,7 +903,7 @@ def format_console_report(
                     highlight=(alert.risk_level == "MEDIUM")
                 )
             if len(other) > 15:
-                print(f"  {Theme.DIM}... and {len(other) - 15} more{Colors.RESET}")
+                print(f"  {Colors.DIM}... and {len(other) - 15} more{Colors.RESET}")
 
         # Investigation Results
         if investigation_reports:

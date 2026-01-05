@@ -289,17 +289,17 @@ def print_scan_results(
     if critical > 0:
         print(f"  {Colors.BG_RED}{Colors.BRIGHT_WHITE}  CRITICAL  {Colors.RESET}  {Theme.VALUE}{critical:>5}{Colors.RESET}")
     else:
-        print(f"  {Theme.DIM}  CRITICAL  {Colors.RESET}  {Theme.DIM}{critical:>5}{Colors.RESET}")
+        print(f"  {Colors.DIM}  CRITICAL  {Colors.RESET}  {Colors.DIM}{critical:>5}{Colors.RESET}")
 
     if high > 0:
         print(f"  {Theme.ERROR}  HIGH      {Colors.RESET}  {Theme.VALUE}{high:>5}{Colors.RESET}")
     else:
-        print(f"  {Theme.DIM}  HIGH      {Colors.RESET}  {Theme.DIM}{high:>5}{Colors.RESET}")
+        print(f"  {Colors.DIM}  HIGH      {Colors.RESET}  {Colors.DIM}{high:>5}{Colors.RESET}")
 
     if medium > 0:
         print(f"  {Theme.WARNING}  MEDIUM    {Colors.RESET}  {Theme.VALUE}{medium:>5}{Colors.RESET}")
     else:
-        print(f"  {Theme.DIM}  MEDIUM    {Colors.RESET}  {Theme.DIM}{medium:>5}{Colors.RESET}")
+        print(f"  {Colors.DIM}  MEDIUM    {Colors.RESET}  {Colors.DIM}{medium:>5}{Colors.RESET}")
 
     print(f"  {Theme.DATA}  LOW       {Colors.RESET}  {Theme.VALUE}{low:>5}{Colors.RESET}")
 
